@@ -1,0 +1,14 @@
+{
+  "id": "aio-aggregator",
+  "name": "All-in-One Aggregator",
+  "description": "Fetches and merges all scrapers from D3adlyRocket, yoruix, and michat88 into one sorted list",
+  "version": "1.0.0",
+  "author": "brotherguns",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/aio-aggregator.js",
+  "enabled": true,
+  "hasSettings": false,
+  "formats": ["mp4", "mkv", "m3u8"],
+  "logo": "",
+  "contentLanguage": ["en"]
+}
