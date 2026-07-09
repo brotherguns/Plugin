@@ -9,7 +9,7 @@
  */
 
 var MANIFEST_URL =
-  'https://raw.githubusercontent.com/brotherguns/Plugin/main/manifest.json';
+  'https://raw.githubusercontent.com/brotherguns/Plugin/refs/heads/main/combined_manifest.json';
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
