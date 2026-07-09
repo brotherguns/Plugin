@@ -13,7 +13,7 @@
       "enabled": true,
       "hasSettings": false,
       "formats": ["mp4", "mkv", "m3u8"],
-      "logo": "",
+      "logo": "null",
       "contentLanguage": ["en"]
     }
   ]
