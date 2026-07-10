@@ -1,11 +1,11 @@
 {
   "name": "All-in-One",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "scrapers": [
     {
       "id": "Cineby",
       "name": "Cineby",
-      "description": "Multi-server movie and TV streaming — 4K/1080p/720p from Videasy network without subtitles",
+      "description": "Multi-server movie and TV streaming — 4K/1080p/720p from Videasy network",
       "version": "1.9.2",
       "author": "Nuvio Team",
       "supportedTypes": ["movie", "tv"],
@@ -19,7 +19,7 @@
     {
       "id": "vidlink",
       "name": "VidLink",
-      "description": "Vidlink streaming with encrypted TMDB ID support for movies and TV shows",
+      "description": "Vidlink streaming with encrypted TMDB ID support",
       "version": "1.0.0",
       "author": "Nuvio Team",
       "supportedTypes": ["movie", "tv"],
@@ -33,7 +33,7 @@
     {
       "id": "vidsrc",
       "name": "VidSrc",
-      "description": "Vidsrc — movies and TV shows in 1080p HD",
+      "description": "Movies and TV shows in 1080p HD",
       "version": "1.0.0",
       "author": "Nuvio Team",
       "supportedTypes": ["movie", "tv"],
@@ -59,23 +59,9 @@
       "contentLanguage": ["en"]
     },
     {
-      "id": "multivid",
-      "name": "MultiVid",
-      "description": "MultiVid — includes VidEasy, VidLink, VidMody & VidSrc",
-      "version": "1.0.0",
-      "author": "Nuvio Team",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "https://raw.githubusercontent.com/D3adlyRocket/All-in-One-Nuvio/refs/heads/main/providers/multivid.js",
-      "enabled": true,
-      "hasSettings": false,
-      "formats": ["mp4", "m3u8"],
-      "logo": "https://i.postimg.cc/brxL7qg3/multivid.png",
-      "contentLanguage": ["en"]
-    },
-    {
       "id": "showbox",
       "name": "ShowBox",
-      "description": "ShowBox streaming with multiple quality options and versions",
+      "description": "ShowBox streaming with multiple quality options",
       "version": "1.0.0",
       "author": "Nuvio Team",
       "supportedTypes": ["movie", "tv"],
@@ -115,20 +101,6 @@
       "contentLanguage": ["en", "es"]
     },
     {
-      "id": "streamflix",
-      "name": "StreamFlix",
-      "description": "1080p movies in multi-language",
-      "version": "2.0.0",
-      "author": "Kabir",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "https://raw.githubusercontent.com/D3adlyRocket/All-in-One-Nuvio/refs/heads/main/providers/streamflix.js",
-      "enabled": true,
-      "hasSettings": false,
-      "formats": ["mp4", "m3u8"],
-      "logo": "https://i.postimg.cc/4yVjQjpH/streamflix.png",
-      "contentLanguage": ["en", "hi", "ta"]
-    },
-    {
       "id": "vegamovies",
       "name": "VegaMovies",
       "description": "VegaMovies streaming with high-quality direct links",
@@ -159,7 +131,7 @@
     {
       "id": "hdhub4u",
       "name": "HDHub4u",
-      "description": "Direct links from HDHub4u with high-speed download support",
+      "description": "Direct links from HDHub4u",
       "version": "1.0.1",
       "author": "Nuvio Team",
       "supportedTypes": ["movie", "tv"],
@@ -187,7 +159,7 @@
     {
       "id": "hianime",
       "name": "HiAnime",
-      "description": "HiAnime multi-server anime streaming with real-time mapping and subtitles",
+      "description": "HiAnime multi-server anime streaming",
       "version": "1.0.0",
       "author": "Nuvio Team",
       "supportedTypes": ["movie", "tv"],
