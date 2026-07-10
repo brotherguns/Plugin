@@ -8,8 +8,7 @@
  * Runtime: QuickJS (quickjs-kt) — no Node built-ins, no ES modules.
  */
 
-var MANIFEST_URL =
-  'https://raw.githubusercontent.com/brotherguns/Plugin/refs/heads/main/combined_manifest.json';
+var MANIFEST_URL ='https://raw.githubusercontent.com/brotherguns/Plugin/refs/heads/main/combined_manifest.json';
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
