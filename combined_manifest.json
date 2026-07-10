@@ -25,29 +25,6 @@
       ]
     },
     {
-      "id": "showbox",
-      "name": "ShowBox",
-      "description": "ShowBox streaming with multiple quality options and versions",
-      "version": "1.0.0",
-      "author": "Nuvio Team",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
-      "filename": "https://raw.githubusercontent.com/D3adlyRocket/All-in-One-Nuvio/refs/heads/main/providers/showbox.js",
-      "enabled": true,
-      "hasSettings": true,
-      "formats": [
-        "mp4",
-        "mkv",
-        "m3u8"
-      ],
-      "logo": "https://i.postimg.cc/8c5XGzsx/showbox.png",
-      "contentLanguage": [
-        "en"
-      ]
-    },
-    {
       "id": "vidsrc",
       "name": "VidSrc",
       "description": "Vidsrc - The best place to watch movies and TV shows online for free. Stream in 1080p HD",
