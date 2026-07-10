@@ -1,15 +1,17 @@
 /**
  * All-in-One Aggregator — Nuvio Plugin
  *
- * Three-phase pipeline for maximum concurrency in single-threaded QuickJS:
- *   Phase 1  →  Promise.all all fetches (all in-flight from tick 1)
+ * Pipeline:
+ *   Phase 1  →  Promise.all all fetches
  *   Phase 2  →  Synchronous eval of every returned source string
  *   Phase 3  →  Promise.allSettled all getStreams calls
+ *   Phase 4  →  Smart merge, deduplicate, multi-factor sort
  *
- * No setTimeout, no AbortController — neither exists in QuickJS.
- * Error isolation: every scraper call is individually .catch-wrapped,
- * Promise.allSettled absorbs rejections, and a top-level catch guards
- * the entire pipeline.
+ * Sort factors (in priority order):
+ *   1. Quality tier  (2160p > 1080p > 720p > 480p > unknown)
+ *   2. URL health    (direct video files > CDN > API > redirectors > junk)
+ *   3. Format        (m3u8 > mkv/mp4 for streaming)
+ *   4. File size     (larger = better encode, descending)
  *
  * Runtime: QuickJS (quickjs-kt) — CommonJS only, no Node built-ins.
  */
@@ -18,18 +20,103 @@ var MANIFEST_URL =
   'https://raw.githubusercontent.com/brotherguns/Plugin/refs/heads/main/combined_manifest.json';
 
 /* ------------------------------------------------------------------ */
-/*  Helpers                                                           */
+/*  Quality helpers                                                   */
 /* ------------------------------------------------------------------ */
 
-function qualityRank(q) {
-  if (!q) return 4;
+/**
+ * Extract quality tier from an explicit quality string.
+ * Returns 0–4 (lower = better) or -1 if nothing detected.
+ */
+function parseQualityString(q) {
+  if (!q) return -1;
   var s = String(q).toLowerCase();
   if (s.indexOf('2160') !== -1 || s.indexOf('4k') !== -1 || s.indexOf('uhd') !== -1) return 0;
   if (s.indexOf('1080') !== -1) return 1;
   if (s.indexOf('720')  !== -1) return 2;
   if (s.indexOf('480')  !== -1 || s.indexOf('360') !== -1 || s.indexOf('240') !== -1) return 3;
-  return 4;
+  return -1;
 }
+
+/**
+ * Try to infer quality from URL path and stream title/name.
+ * Scrapers often embed quality in filenames even when the quality field is blank.
+ */
+function inferQuality(stream) {
+  /* 1. Check the explicit field first */
+  var rank = parseQualityString(stream.quality);
+  if (rank !== -1) return rank;
+
+  /* 2. Scan URL, title, and name for quality markers */
+  var haystack = (
+    (stream.url || '') + ' ' +
+    (stream.title || '') + ' ' +
+    (stream.name || '')
+  ).toLowerCase();
+
+  if (/2160p|\.4k\.|4k[-_. ]|uhd/i.test(haystack)) return 0;
+  if (/1080p/i.test(haystack)) return 1;
+  if (/720p/i.test(haystack))  return 2;
+  if (/480p|360p|240p/i.test(haystack)) return 3;
+
+  /* 3. "HD" without a specific resolution → assume 720p */
+  if (/[\b\-_.]hd[\b\-_. ]/i.test(haystack) || /\.hdrip/i.test(haystack)) return 2;
+
+  return 4; /* truly unknown */
+}
+
+/* ------------------------------------------------------------------ */
+/*  URL health scoring                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Known-bad URL patterns that are HTML pages, not video.
+ * These should be pushed to the bottom regardless of quality.
+ */
+var BAD_URL_PATTERNS = [
+  'gamerxyt.com/dl.php',
+  'gamerxyt.com/hubcloud.php',
+  'hubcloud.cx/drive/',
+  'hubcloud.ist/drive/',
+  '/generate.php',
+];
+
+/**
+ * Direct video file extensions in the URL path.
+ */
+function hasVideoExtension(url) {
+  var path = url.split('?')[0].toLowerCase();
+  return /\.(m3u8|mp4|mkv|webm|avi|ts)$/i.test(path) ||
+         path.indexOf('/playlist.m3u8') !== -1;
+}
+
+/**
+ * Score URL health: 0 = best (direct file), 3 = worst (known junk).
+ */
+function urlHealthScore(url) {
+  if (!url) return 3;
+  var lower = url.toLowerCase();
+
+  /* Known broken patterns → worst */
+  for (var i = 0; i < BAD_URL_PATTERNS.length; i++) {
+    if (lower.indexOf(BAD_URL_PATTERNS[i]) !== -1) return 3;
+  }
+
+  /* Direct video file → best */
+  if (hasVideoExtension(url)) return 0;
+
+  /* CDN / storage domains → good */
+  if (lower.indexOf('r2.cloudflarestorage.com') !== -1 ||
+      lower.indexOf('workers.dev') !== -1 ||
+      lower.indexOf('ironbubble.site') !== -1 ||
+      lower.indexOf('videocontentscdn') !== -1) return 1;
+
+  /* Everything else (API endpoints, embed URLs) → acceptable */
+  return 2;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Size + format helpers                                             */
+/* ------------------------------------------------------------------ */
 
 function parseSizeToBytes(size) {
   if (!size) return 0;
@@ -45,7 +132,22 @@ function parseSizeToBytes(size) {
   return 0;
 }
 
-/* Resolved once, cached for all sub-scrapers */
+/**
+ * Format preference for streaming: m3u8 (adaptive) > mp4 > mkv > other.
+ */
+function formatScore(url) {
+  if (!url) return 3;
+  var lower = url.split('?')[0].toLowerCase();
+  if (lower.indexOf('.m3u8') !== -1 || lower.indexOf('playlist.m3u8') !== -1) return 0;
+  if (lower.indexOf('.mp4') !== -1) return 1;
+  if (lower.indexOf('.mkv') !== -1) return 2;
+  return 3;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Runtime helpers                                                   */
+/* ------------------------------------------------------------------ */
+
 var _crypto;
 function getCrypto() {
   if (_crypto !== undefined) return _crypto;
@@ -95,8 +197,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     console.log('AIO: ' + urls.length + ' scrapers in manifest');
 
     /* ── Phase 1: Fetch ALL scraper JS files simultaneously ──────── */
-    /*    One Promise.all — every fetch launches on the same tick.    */
-    /*    Non-200 or network error → null, skip immediately.         */
 
     var codes = await Promise.all(urls.map(function (url) {
       return fetch(url).then(function (r) {
@@ -108,7 +208,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     }));
 
     /* ── Phase 2: Eval all source strings synchronously ──────────── */
-    /*    Pure CPU, no I/O. Runs in one pass.                        */
 
     var scraperFns = [];
     var crypto = getCrypto();
@@ -138,15 +237,11 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
 
-    /* Free source strings */
     codes = null;
 
     console.log('AIO: ' + scraperFns.length + ' scrapers loaded');
 
     /* ── Phase 3: Call ALL getStreams simultaneously ──────────────── */
-    /*    Promise.allSettled — never rejects, always returns results. */
-    /*    Each call is also individually .catch-wrapped so even if    */
-    /*    allSettled somehow sees a rejection it maps to [].          */
 
     var settled = await Promise.allSettled(scraperFns.map(function (entry) {
       return Promise.resolve().then(function () {
@@ -159,13 +254,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       });
     }));
 
-    /* Map allSettled outcomes: fulfilled → value, rejected → []      */
     var resultSets = [];
     for (var i = 0; i < settled.length; i++) {
       resultSets.push(settled[i].status === 'fulfilled' ? settled[i].value : []);
     }
 
-    /* ── Phase 4: Merge → deduplicate → sort ─────────────────────── */
+    /* ── Phase 4: Merge → deduplicate → smart sort ───────────────── */
 
     var seen   = Object.create(null);
     var merged = [];
@@ -182,18 +276,41 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
 
+    /* Pre-compute sort keys to avoid recalculating per comparison */
+    for (var i = 0; i < merged.length; i++) {
+      var s = merged[i];
+      s._qRank  = inferQuality(s);
+      s._health = urlHealthScore(s.url);
+      s._fmt    = formatScore(s.url);
+      s._size   = parseSizeToBytes(s.size);
+    }
+
     merged.sort(function (a, b) {
-      var qa = qualityRank(a.quality);
-      var qb = qualityRank(b.quality);
-      if (qa !== qb) return qa - qb;
-      return parseSizeToBytes(b.size) - parseSizeToBytes(a.size);
+      /* 1. Quality tier — lower = better */
+      if (a._qRank !== b._qRank) return a._qRank - b._qRank;
+
+      /* 2. URL health — lower = better (direct files first, junk last) */
+      if (a._health !== b._health) return a._health - b._health;
+
+      /* 3. Format preference — m3u8 > mp4 > mkv */
+      if (a._fmt !== b._fmt) return a._fmt - b._fmt;
+
+      /* 4. File size descending — larger = better encode */
+      return b._size - a._size;
     });
+
+    /* Clean up temporary sort keys */
+    for (var i = 0; i < merged.length; i++) {
+      delete merged[i]._qRank;
+      delete merged[i]._health;
+      delete merged[i]._fmt;
+      delete merged[i]._size;
+    }
 
     console.log('AIO: returning ' + merged.length + ' streams');
     return merged;
 
   } catch (e) {
-    /* Top-level catch — entire pipeline failure returns [] */
     console.error('AIO: top-level error — ' + e.message);
     return [];
   }
