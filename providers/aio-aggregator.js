@@ -1,22 +1,23 @@
 /**
- * All-in-One Aggregator — Nuvio Plugin
+ * All-in-One Aggregator — Nuvio Plugin (Optimized)
  *
- * Fetches every scraper listed in the combined manifest, executes each in an
- * isolated Function scope, calls them all in parallel, and returns one
- * deduplicated, quality-sorted flat list of streams.
+ * Three-phase pipeline for maximum concurrency in single-threaded QuickJS:
+ *   Phase 1  →  Promise.all 77 fetches (all in-flight from tick 1)
+ *   Phase 2  →  Synchronous eval of every returned source string
+ *   Phase 3  →  Promise.all 77 getStreams calls (each with 20s timeout)
  *
- * Runtime: QuickJS (quickjs-kt) — no Node built-ins, no ES modules.
+ * Runtime: QuickJS (quickjs-kt) — CommonJS only, no Node built-ins.
  */
 
-var MANIFEST_URL ='https://raw.githubusercontent.com/brotherguns/Plugin/refs/heads/main/combined_manifest.json';
+var MANIFEST_URL =
+  'https://raw.githubusercontent.com/brotherguns/Plugin/refs/heads/main/combined_manifest.json';
+
+var TIMEOUT_MS = 20000;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
 
-/**
- * Map a quality string to a numeric tier (lower = better).
- */
 function qualityRank(q) {
   if (!q) return 4;
   var s = String(q).toLowerCase();
@@ -27,9 +28,6 @@ function qualityRank(q) {
   return 4;
 }
 
-/**
- * Parse human-readable size strings ("13.2 GB", "850 MB") to bytes.
- */
 function parseSizeToBytes(size) {
   if (!size) return 0;
   var m = String(size).match(/([\d.]+)\s*(tb|gb|mb|kb)/i);
@@ -45,168 +43,140 @@ function parseSizeToBytes(size) {
 }
 
 /**
- * Build a safe require() to pass into each sub-scraper scope.
- * Only cheerio and crypto-js are available in QuickJS.
+ * Race a promise against a 20-second timeout that resolves to [].
+ * Falls back to a plain catch wrapper if setTimeout is unavailable.
  */
-function buildSafeRequire() {
-  return function safeRequire(name) {
-    try {
-      return require(name);
-    } catch (e) {
-      console.error('require("' + name + '") failed: ' + e.message);
-      return undefined;
-    }
-  };
-}
-
-/**
- * Resolve the CryptoJS reference — may be a global or require()-able.
- */
-function resolveCryptoJS() {
-  if (typeof CryptoJS !== 'undefined') return CryptoJS;
-  try { return require('crypto-js'); } catch (e) { return undefined; }
-}
-
-/**
- * Resolve __native_fetch — fall back to global fetch.
- */
-function resolveNativeFetch() {
-  if (typeof __native_fetch !== 'undefined') return __native_fetch;
-  return fetch;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Scraper loader                                                    */
-/* ------------------------------------------------------------------ */
-
-/**
- * Execute a fetched scraper source string inside a fresh Function scope
- * and return its getStreams function (or null).
- */
-function loadScraperFromCode(code, label) {
-  // Every sub-scraper gets its own module/exports pair so that
-  // `module.exports = …` inside one scraper does not clobber another.
-  var mod = { exports: {} };
-
-  // Some scrapers read these globals at load time.
-  globalThis.SCRAPER_ID       = '';
-  globalThis.SCRAPER_SETTINGS = {};
-
-  var wrapper = new Function(
-    'module',
-    'exports',
-    'require',
-    'fetch',
-    'console',
-    'CryptoJS',
-    '__native_fetch',
-    code
-  );
-
-  wrapper(
-    mod,
-    mod.exports,
-    buildSafeRequire(),
-    fetch,
-    console,
-    resolveCryptoJS(),
-    resolveNativeFetch()
-  );
-
-  // The scraper may have done either:
-  //   module.exports = { getStreams }        → mod.exports replaced
-  //   module.exports.getStreams = function…  → mod.exports augmented
-  //   exports.getStreams = function…         → same object unless replaced
-  var gs = (typeof mod.exports === 'function')
-    ? mod.exports                       // unlikely but defensive
-    : mod.exports.getStreams;
-
-  if (typeof gs !== 'function') {
-    console.error('Scraper [' + label + '] did not export getStreams');
-    return null;
+function withTimeout(promise, ms) {
+  if (typeof setTimeout !== 'function') {
+    return promise.catch(function () { return []; });
   }
-  return gs;
+  var timer;
+  var timeout = new Promise(function (resolve) {
+    timer = setTimeout(function () { resolve([]); }, ms);
+  });
+  return Promise.race([promise, timeout]).then(
+    function (result) { clearTimeout(timer); return result; },
+    function ()       { clearTimeout(timer); return [];     }
+  );
+}
+
+/* Cached CryptoJS reference — resolved once */
+var _crypto;
+function getCrypto() {
+  if (_crypto !== undefined) return _crypto;
+  if (typeof CryptoJS !== 'undefined') { _crypto = CryptoJS; return _crypto; }
+  try { _crypto = require('crypto-js'); } catch (e) { _crypto = null; }
+  return _crypto;
+}
+
+function safeRequire(name) {
+  try { return require(name); } catch (e) { return undefined; }
 }
 
 /* ------------------------------------------------------------------ */
-/*  Main entry point                                                  */
+/*  Entry point                                                       */
 /* ------------------------------------------------------------------ */
 
 async function getStreams(tmdbId, mediaType, season, episode) {
 
-  /* ---------- 1. Fetch the combined manifest ------------------------ */
+  /* ── Phase 0: Fetch the combined manifest ──────────────────────── */
+
   var manifest;
   try {
     var mRes = await fetch(MANIFEST_URL);
     manifest = await mRes.json();
   } catch (e) {
-    console.error('Aggregator: manifest fetch failed — ' + e.message);
+    console.error('AIO: manifest fetch failed — ' + e.message);
     return [];
   }
 
-  // The manifest may be a flat array or an object wrapping one.
   var entries = Array.isArray(manifest)
     ? manifest
     : (manifest.scrapers || manifest.providers || manifest.plugins || []);
 
-  // Each entry's filename is already an absolute URL.
-  var scraperUrls = [];
+  var urls = [];
   for (var i = 0; i < entries.length; i++) {
-    var e = entries[i];
-    var url = (typeof e === 'string') ? e : (e.filename || e.url || e.file || '');
-    if (url && url.indexOf('http') === 0) {
-      scraperUrls.push(url);
-    }
+    var entry = entries[i];
+    var url = (typeof entry === 'string') ? entry : (entry.filename || entry.url || '');
+    if (url && url.indexOf('http') === 0) urls.push(url);
   }
 
-  console.log('Aggregator: ' + scraperUrls.length + ' scraper URLs from manifest');
+  if (!urls.length) {
+    console.error('AIO: manifest contained 0 scraper URLs');
+    return [];
+  }
 
-  /* ---------- 2. Fetch all scraper source files in parallel ---------- */
-  var codePromises = scraperUrls.map(function (url) {
-    return fetch(url)
-      .then(function (r) { return r.text(); })
-      .catch(function (e) {
-        console.error('Aggregator: fetch failed for ' + url + ' — ' + e.message);
-        return null;
-      });
-  });
-  var codes = await Promise.all(codePromises);
+  console.log('AIO: ' + urls.length + ' scrapers in manifest');
 
-  /* ---------- 3. Load each scraper in an isolated scope ------------- */
-  var scraperFns = []; // { fn, label }
+  /* ── Phase 1: Fetch ALL scraper JS files simultaneously ────────── */
+  /*    Every fetch is launched on the same tick — no serialization.  */
+
+  var codes = await Promise.all(urls.map(function (url) {
+    return fetch(url).then(function (r) {
+      /* Fail fast on non-200 */
+      if (r.status && r.status !== 200) return null;
+      return r.text();
+    }).catch(function () {
+      return null;
+    });
+  }));
+
+  /* ── Phase 2: Eval all source strings synchronously ────────────── */
+  /*    Pure CPU — no awaits, no I/O. Runs in one go.                */
+
+  var scraperFns = [];
+  var crypto = getCrypto();
+
   for (var i = 0; i < codes.length; i++) {
     if (!codes[i]) continue;
     try {
-      var fn = loadScraperFromCode(codes[i], scraperUrls[i]);
-      if (fn) scraperFns.push({ fn: fn, label: scraperUrls[i] });
+      var mod = { exports: {} };
+      globalThis.SCRAPER_ID       = '';
+      globalThis.SCRAPER_SETTINGS = {};
+
+      var wrapper = new Function(
+        'module', 'exports', 'require', 'fetch', 'console', 'CryptoJS',
+        codes[i]
+      );
+      wrapper(mod, mod.exports, safeRequire, fetch, console, crypto);
+
+      var gs = (typeof mod.exports === 'function')
+        ? mod.exports
+        : mod.exports.getStreams;
+
+      if (typeof gs === 'function') {
+        scraperFns.push({ fn: gs, label: urls[i] });
+      }
     } catch (e) {
-      console.error('Aggregator: load error [' + scraperUrls[i] + '] — ' + e.message);
+      console.error('AIO: eval [' + urls[i] + '] — ' + e.message);
     }
   }
 
-  console.log('Aggregator: ' + scraperFns.length + ' scrapers loaded');
+  /* Free source strings — no longer needed */
+  codes = null;
 
-  /* ---------- 4. Call every getStreams in parallel ------------------- */
-  var resultSets = await Promise.all(
-    scraperFns.map(function (entry) {
-      return Promise.resolve()
-        .then(function () {
-          // Reset globals before each async call in case a scraper
-          // mutates them during its own execution.
-          globalThis.SCRAPER_ID       = '';
-          globalThis.SCRAPER_SETTINGS = {};
-          return entry.fn(tmdbId, mediaType, season, episode);
-        })
-        .catch(function (e) {
-          console.error('Aggregator: runtime error [' + entry.label + '] — ' + e.message);
-          return [];
-        });
-    })
-  );
+  console.log('AIO: ' + scraperFns.length + ' scrapers loaded');
 
-  /* ---------- 5. Merge & deduplicate by URL ------------------------- */
-  var seen    = Object.create(null);   // prototype-less map
-  var merged  = [];
+  /* ── Phase 3: Call ALL getStreams simultaneously ────────────────── */
+  /*    Each call is raced against a 20-second timeout → [].         */
+
+  var resultSets = await Promise.all(scraperFns.map(function (entry) {
+    var p = Promise.resolve().then(function () {
+      globalThis.SCRAPER_ID       = '';
+      globalThis.SCRAPER_SETTINGS = {};
+      return entry.fn(tmdbId, mediaType, season, episode);
+    }).catch(function (e) {
+      console.error('AIO: call [' + entry.label + '] — ' + e.message);
+      return [];
+    });
+
+    return withTimeout(p, TIMEOUT_MS);
+  }));
+
+  /* ── Phase 4: Merge → deduplicate → sort ───────────────────────── */
+
+  var seen   = Object.create(null);
+  var merged = [];
 
   for (var i = 0; i < resultSets.length; i++) {
     var arr = resultSets[i];
@@ -220,7 +190,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     }
   }
 
-  /* ---------- 6. Sort: quality tier ↑, then file size ↓ ------------- */
   merged.sort(function (a, b) {
     var qa = qualityRank(a.quality);
     var qb = qualityRank(b.quality);
@@ -228,12 +197,10 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     return parseSizeToBytes(b.size) - parseSizeToBytes(a.size);
   });
 
-  console.log('Aggregator: returning ' + merged.length + ' streams');
+  console.log('AIO: returning ' + merged.length + ' streams');
   return merged;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Export                                                             */
-/* ------------------------------------------------------------------ */
+/* ── Export ───────────────────────────────────────────────────────── */
 
 module.exports = { getStreams: getStreams };
